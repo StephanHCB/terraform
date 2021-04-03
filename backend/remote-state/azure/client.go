@@ -46,8 +46,14 @@ func (c *RemoteClient) Get() (*remote.Payload, error) {
 		return nil, err
 	}
 
+	data, err := possiblyDecrypt(blob.Contents)
+	if err != nil {
+		// TODO handle
+		log.Fatal("error during decryption: %v", err.Error())
+	}
+
 	payload := &remote.Payload{
-		Data: blob.Contents,
+		Data: data,
 	}
 
 	// If there was no data, then return nil
@@ -91,8 +97,14 @@ func (c *RemoteClient) Put(data []byte) error {
 		}
 	}
 
+	cipherdata, err := possiblyEncrypt(data)
+	if err != nil {
+		// TODO handle
+		log.Fatal("error during encryption: %v", err.Error())
+	}
+
 	contentType := "application/json"
-	putOptions.Content = &data
+	putOptions.Content = &cipherdata
 	putOptions.ContentType = &contentType
 	putOptions.MetaData = blob.MetaData
 	_, err = c.giovanniBlobClient.PutBlockBlob(ctx, c.accountName, c.containerName, c.keyName, putOptions)
