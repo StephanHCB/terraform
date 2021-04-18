@@ -26,6 +26,21 @@ type remoteClient struct {
 }
 
 func (c *remoteClient) Get() (payload *remote.Payload, err error) {
+	// stateFile() sets encryption key on the ObjectHandle
+	//
+	// additionally (why only for read?)
+	//
+	// NewReader sets up encryption headers on the get request, the decryption is done at the other end it seems
+	//
+	// 	if copySource {
+	//		cs = "copy-source-"
+	//	}
+	//	headers.Set("x-goog-"+cs+"encryption-algorithm", "AES256")
+	//	headers.Set("x-goog-"+cs+"encryption-key", base64.StdEncoding.EncodeToString(key))
+	//	keyHash := sha256.Sum256(key)
+	//	headers.Set("x-goog-"+cs+"encryption-key-sha256", base64.StdEncoding.EncodeToString(keyHash[:]))
+	//
+	// -> google backend is not suitable as a generalizable encryption provider
 	stateFileReader, err := c.stateFile().NewReader(c.storageContext)
 	if err != nil {
 		if err == storage.ErrObjectNotExist {
@@ -56,6 +71,7 @@ func (c *remoteClient) Get() (payload *remote.Payload, err error) {
 
 func (c *remoteClient) Put(data []byte) error {
 	err := func() error {
+		// stateFile() sets encryption key on the ObjectHandle
 		stateFileWriter := c.stateFile().NewWriter(c.storageContext)
 		if _, err := stateFileWriter.Write(data); err != nil {
 			return err

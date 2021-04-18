@@ -106,6 +106,9 @@ func (c *RemoteClient) get() (*remote.Payload, error) {
 		Key:    &c.path,
 	}
 
+	// s3 backend also offloads encryption / decryption to the server
+	//
+	// not directly suitable as an encryption backend for general remote state
 	if c.serverSideEncryption && c.customerEncryptionKey != nil {
 		input.SetSSECustomerKey(string(c.customerEncryptionKey))
 		input.SetSSECustomerAlgorithm(s3EncryptionAlgorithm)
