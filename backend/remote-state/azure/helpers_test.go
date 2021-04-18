@@ -17,7 +17,9 @@ import (
 	keyvaultKey "github.com/Azure/azure-sdk-for-go/services/keyvault/2016-10-01/keyvault"
 	"github.com/Azure/azure-sdk-for-go/services/keyvault/mgmt/2019-09-01/keyvault"
 	"github.com/Azure/go-autorest/autorest/to"
-	uuid "github.com/satori/go.uuid"
+	// TODO ask allantargino for review, previously "github.com/satori/go.uuid", but this now fails to compile
+	// seems to me to be a change in the azure sdk data structure that now wants a uuid of this type
+	"github.com/gofrs/uuid"
 	"github.com/tombuildsstuff/giovanni/storage/2018-11-09/blob/containers"
 )
 
