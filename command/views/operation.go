@@ -15,6 +15,8 @@ import (
 )
 
 type Operation interface {
+	Interrupted()
+	FatalInterrupt()
 	Stopping()
 	Cancelled(destroy bool)
 
@@ -30,14 +32,14 @@ type Operation interface {
 func NewOperation(vt arguments.ViewType, inAutomation bool, view *View) Operation {
 	switch vt {
 	case arguments.ViewHuman:
-		return &OperationHuman{View: *view, inAutomation: inAutomation}
+		return &OperationHuman{view: view, inAutomation: inAutomation}
 	default:
 		panic(fmt.Sprintf("unknown view type %v", vt))
 	}
 }
 
 type OperationHuman struct {
-	View
+	view *View
 
 	// inAutomation indicates that commands are being run by an
 	// automated system rather than directly at a command prompt.
@@ -51,15 +53,33 @@ type OperationHuman struct {
 
 var _ Operation = (*OperationHuman)(nil)
 
+func (v *OperationHuman) Interrupted() {
+	v.view.streams.Println(format.WordWrap(interrupted, v.view.outputColumns()))
+}
+
+func (v *OperationHuman) FatalInterrupt() {
+	v.view.streams.Eprintln(format.WordWrap(fatalInterrupt, v.view.errorColumns()))
+}
+
+const fatalInterrupt = `
+Two interrupts received. Exiting immediately. Note that data loss may have occurred.
+`
+
+const interrupted = `
+Interrupt received.
+Please wait for Terraform to exit or data loss may occur.
+Gracefully shutting down...
+`
+
 func (v *OperationHuman) Stopping() {
-	v.streams.Println("Stopping operation...")
+	v.view.streams.Println("Stopping operation...")
 }
 
 func (v *OperationHuman) Cancelled(destroy bool) {
 	if destroy {
-		v.streams.Println("Destroy cancelled.")
+		v.view.streams.Println("Destroy cancelled.")
 	} else {
-		v.streams.Println("Apply cancelled.")
+		v.view.streams.Println("Apply cancelled.")
 	}
 }
 
@@ -69,17 +89,17 @@ func (v *OperationHuman) EmergencyDumpState(stateFile *statefile.File) error {
 	if jsonErr != nil {
 		return jsonErr
 	}
-	v.streams.Eprintln(stateBuf)
+	v.view.streams.Eprintln(stateBuf)
 	return nil
 }
 
 func (v *OperationHuman) PlanNoChanges() {
-	v.streams.Println("\n" + v.colorize.Color(strings.TrimSpace(planNoChanges)))
-	v.streams.Println("\n" + strings.TrimSpace(format.WordWrap(planNoChangesDetail, v.outputColumns())))
+	v.view.streams.Println("\n" + v.view.colorize.Color(strings.TrimSpace(planNoChanges)))
+	v.view.streams.Println("\n" + strings.TrimSpace(format.WordWrap(planNoChangesDetail, v.view.outputColumns())))
 }
 
 func (v *OperationHuman) Plan(plan *plans.Plan, baseState *states.State, schemas *terraform.Schemas) {
-	renderPlan(plan, baseState, schemas, &v.View)
+	renderPlan(plan, baseState, schemas, v.view)
 }
 
 // PlanNextStep gives the user some next-steps, unless we're running in an
@@ -88,18 +108,22 @@ func (v *OperationHuman) PlanNextStep(planPath string) {
 	if v.inAutomation {
 		return
 	}
-	v.outputHorizRule()
+	v.view.outputHorizRule()
 
 	if planPath == "" {
-		v.streams.Print(
-			"\n" + strings.TrimSpace(format.WordWrap(planHeaderNoOutput, v.outputColumns())) + "\n",
+		v.view.streams.Print(
+			"\n" + strings.TrimSpace(format.WordWrap(planHeaderNoOutput, v.view.outputColumns())) + "\n",
 		)
 	} else {
-		v.streams.Printf(
-			"\n"+strings.TrimSpace(format.WordWrap(planHeaderYesOutput, v.outputColumns()))+"\n",
+		v.view.streams.Printf(
+			"\n"+strings.TrimSpace(format.WordWrap(planHeaderYesOutput, v.view.outputColumns()))+"\n",
 			planPath, planPath,
 		)
 	}
+}
+
+func (v *OperationHuman) Diagnostics(diags tfdiags.Diagnostics) {
+	v.view.Diagnostics(diags)
 }
 
 const planNoChanges = `
@@ -107,7 +131,7 @@ const planNoChanges = `
 `
 
 const planNoChangesDetail = `
-That Terraform did not detect any differences between your configuration and the remote system(s). As a result, there are no actions to take.
+This means that Terraform did not detect any differences between your configuration and the remote system(s). As a result, there are no actions to take.
 `
 
 const planHeaderNoOutput = `

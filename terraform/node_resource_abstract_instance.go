@@ -267,7 +267,7 @@ const (
 //
 // targetState determines which context state we're writing to during plan. The
 // default is the global working state.
-func (n *NodeAbstractResourceInstance) writeResourceInstanceState(ctx EvalContext, obj *states.ResourceInstanceObject, dependencies []addrs.ConfigResource, targetState phaseState) error {
+func (n *NodeAbstractResourceInstance) writeResourceInstanceState(ctx EvalContext, obj *states.ResourceInstanceObject, targetState phaseState) error {
 	absAddr := n.Addr
 	_, providerSchema, err := getProvider(ctx, n.ResolvedProvider)
 	if err != nil {
@@ -288,12 +288,6 @@ func (n *NodeAbstractResourceInstance) writeResourceInstanceState(ctx EvalContex
 		state.SetResourceInstanceCurrent(absAddr, nil, n.ResolvedProvider)
 		log.Printf("[TRACE] writeResourceInstanceState: removing state object for %s", absAddr)
 		return nil
-	}
-
-	// store the new deps in the state.
-	// We check for nil here because don't want to override existing dependencies on orphaned nodes.
-	if dependencies != nil {
-		obj.Dependencies = dependencies
 	}
 
 	if providerSchema == nil {
@@ -526,8 +520,6 @@ func (n *NodeAbstractResourceInstance) refresh(ctx EvalContext, state *states.Re
 	ret := state.DeepCopy()
 	ret.Value = resp.NewState
 	ret.Private = resp.Private
-	ret.Dependencies = state.Dependencies
-	ret.CreateBeforeDestroy = state.CreateBeforeDestroy
 
 	// Call post-refresh hook
 	diags = diags.Append(ctx.Hook(func(h Hook) (HookAction, error) {
@@ -633,8 +625,9 @@ func (n *NodeAbstractResourceInstance) plan(
 			Config:   unmarkedConfigVal,
 		},
 	)
+
 	if validateResp.Diagnostics.HasErrors() {
-		diags = diags.Append(validateResp.Diagnostics.InConfigBody(config.Config))
+		diags = diags.Append(validateResp.Diagnostics.InConfigBody(config.Config, n.Addr.String()))
 		return plan, state, diags
 	}
 
@@ -667,7 +660,7 @@ func (n *NodeAbstractResourceInstance) plan(
 		PriorPrivate:     priorPrivate,
 		ProviderMeta:     metaConfigVal,
 	})
-	diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config))
+	diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config, n.Addr.String()))
 	if diags.HasErrors() {
 		return plan, state, diags
 	}
@@ -877,7 +870,7 @@ func (n *NodeAbstractResourceInstance) plan(
 		// Consequently, we break from the usual pattern here and only
 		// append these new diagnostics if there's at least one error inside.
 		if resp.Diagnostics.HasErrors() {
-			diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config))
+			diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config, n.Addr.String()))
 			return plan, state, diags
 		}
 		plannedNewVal = resp.PlannedState
@@ -1196,14 +1189,14 @@ func (n *NodeAbstractResourceInstance) readDataSource(ctx EvalContext, configVal
 	configVal, pvm = configVal.UnmarkDeepWithPaths()
 
 	log.Printf("[TRACE] readDataSource: Re-validating config for %s", n.Addr)
-	validateResp := provider.ValidateDataSourceConfig(
-		providers.ValidateDataSourceConfigRequest{
+	validateResp := provider.ValidateDataResourceConfig(
+		providers.ValidateDataResourceConfigRequest{
 			TypeName: n.Addr.ContainingResource().Resource.Type,
 			Config:   configVal,
 		},
 	)
 	if validateResp.Diagnostics.HasErrors() {
-		return newVal, validateResp.Diagnostics.InConfigBody(config.Config)
+		return newVal, validateResp.Diagnostics.InConfigBody(config.Config, n.Addr.String())
 	}
 
 	// If we get down here then our configuration is complete and we're read
@@ -1215,7 +1208,7 @@ func (n *NodeAbstractResourceInstance) readDataSource(ctx EvalContext, configVal
 		Config:       configVal,
 		ProviderMeta: metaConfigVal,
 	})
-	diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config))
+	diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config, n.Addr.String()))
 	if diags.HasErrors() {
 		return newVal, diags
 	}
@@ -1455,6 +1448,9 @@ func (n *NodeAbstractResourceInstance) planDataSource(ctx EvalContext, currentSt
 // immediately reading from the data source where possible, instead forcing us
 // to generate a plan.
 func (n *NodeAbstractResourceInstance) forcePlanReadData(ctx EvalContext) bool {
+	nModInst := n.Addr.Module
+	nMod := nModInst.Module()
+
 	// Check and see if any depends_on dependencies have
 	// changes, since they won't show up as changes in the
 	// configuration.
@@ -1469,6 +1465,18 @@ func (n *NodeAbstractResourceInstance) forcePlanReadData(ctx EvalContext) bool {
 		}
 
 		for _, change := range changes.GetChangesForConfigResource(d) {
+			changeModInst := change.Addr.Module
+			changeMod := changeModInst.Module()
+
+			if changeMod.Equal(nMod) && !changeModInst.Equal(nModInst) {
+				// Dependencies are tracked by configuration address, which
+				// means we may have changes from other instances of parent
+				// modules. The actual reference can only take effect within
+				// the same module instance, so skip any that aren't an exact
+				// match
+				continue
+			}
+
 			if change != nil && change.Action != plans.NoOp {
 				return true
 			}
@@ -1734,7 +1742,7 @@ func (n *NodeAbstractResourceInstance) applyProvisioners(ctx EvalContext, state 
 			Connection: unmarkedConnInfo,
 			UIOutput:   &output,
 		})
-		applyDiags := resp.Diagnostics.InConfigBody(prov.Config)
+		applyDiags := resp.Diagnostics.InConfigBody(prov.Config, n.Addr.String())
 
 		// Call post hook
 		hookErr := ctx.Hook(func(h Hook) (HookAction, error) {
@@ -1900,7 +1908,7 @@ func (n *NodeAbstractResourceInstance) apply(
 	})
 	applyDiags := resp.Diagnostics
 	if applyConfig != nil {
-		applyDiags = applyDiags.InConfigBody(applyConfig.Config)
+		applyDiags = applyDiags.InConfigBody(applyConfig.Config, n.Addr.String())
 	}
 	diags = diags.Append(applyDiags)
 
@@ -2094,6 +2102,13 @@ func (n *NodeAbstractResourceInstance) apply(
 			Private:             resp.Private,
 			CreateBeforeDestroy: createBeforeDestroy,
 		}
+
+		// if the resource was being deleted, the dependencies are not going to
+		// be recalculated and we need to restore those as well.
+		if change.Action == plans.Delete {
+			newState.Dependencies = state.Dependencies
+		}
+
 		return newState, diags
 
 	case !newVal.IsNull():

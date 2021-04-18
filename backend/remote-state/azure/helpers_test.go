@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/profiles/2017-03-09/resources/mgmt/resources"
-	armStorage "github.com/Azure/azure-sdk-for-go/profiles/2017-03-09/storage/mgmt/storage"
+	armStorage "github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2021-01-01/storage"
 	"github.com/Azure/go-autorest/autorest"
 	sasStorage "github.com/hashicorp/go-azure-helpers/storage"
 
@@ -94,6 +94,7 @@ func buildTestClient(t *testing.T, res resourceNames) *ArmClient {
 		StorageAccountName:            res.storageAccountName,
 		KeyVaultKeyIdentifier:         keyVaultKeyIdentifier,
 		UseMsi:                        msiEnabled,
+		UseAzureADAuthentication:      res.useAzureADAuth,
 	})
 	if err != nil {
 		t.Fatalf("Failed to build ArmClient: %+v", err)
@@ -136,6 +137,7 @@ type resourceNames struct {
 	storageContainerName    string
 	storageKeyName          string
 	storageAccountAccessKey string
+	useAzureADAuth          bool
 	keyVaultName            string
 	keyVaultKeyName         string
 }
@@ -147,6 +149,7 @@ func testResourceNames(rString string, keyName string) resourceNames {
 		storageAccountName:   fmt.Sprintf("acctestsa%s", rString),
 		storageContainerName: "acctestcont",
 		storageKeyName:       keyName,
+		useAzureADAuth:       false,
 	}
 }
 
@@ -166,13 +169,20 @@ func (c *ArmClient) buildTestResources(ctx context.Context, names *resourceNames
 	}
 
 	log.Printf("Creating Storage Account %q in Resource Group %q", names.storageAccountName, names.resourceGroup)
-	future, err := c.storageAccountsClient.Create(ctx, names.resourceGroup, names.storageAccountName, armStorage.AccountCreateParameters{
+	storageProps := armStorage.AccountCreateParameters{
 		Sku: &armStorage.Sku{
 			Name: armStorage.StandardLRS,
 			Tier: armStorage.Standard,
 		},
 		Location: &names.location,
-	})
+	}
+	if names.useAzureADAuth {
+		allowSharedKeyAccess := false
+		storageProps.AccountPropertiesCreateParameters = &armStorage.AccountPropertiesCreateParameters{
+			AllowSharedKeyAccess: &allowSharedKeyAccess,
+		}
+	}
+	future, err := c.storageAccountsClient.Create(ctx, names.resourceGroup, names.storageAccountName, storageProps)
 	if err != nil {
 		return fmt.Errorf("failed to create test storage account: %s", err)
 	}
@@ -182,23 +192,27 @@ func (c *ArmClient) buildTestResources(ctx context.Context, names *resourceNames
 		return fmt.Errorf("failed waiting for the creation of storage account: %s", err)
 	}
 
-	log.Printf("fetching access key for storage account")
-	resp, err := c.storageAccountsClient.ListKeys(ctx, names.resourceGroup, names.storageAccountName)
-	if err != nil {
-		return fmt.Errorf("failed to list storage account keys %s", err)
-	}
-
-	keys := *resp.Keys
-	accessKey := *keys[0].Value
-	names.storageAccountAccessKey = accessKey
-
-	storageAuth, err := autorest.NewSharedKeyAuthorizer(names.storageAccountName, accessKey, autorest.SharedKey)
-	if err != nil {
-		return fmt.Errorf("Error building Authorizer: %+v", err)
-	}
-
 	containersClient := containers.NewWithEnvironment(c.environment)
-	containersClient.Client.Authorizer = storageAuth
+	if names.useAzureADAuth {
+		containersClient.Client.Authorizer = *c.azureAdStorageAuth
+	} else {
+		log.Printf("fetching access key for storage account")
+		resp, err := c.storageAccountsClient.ListKeys(ctx, names.resourceGroup, names.storageAccountName, "")
+		if err != nil {
+			return fmt.Errorf("failed to list storage account keys %s:", err)
+		}
+
+		keys := *resp.Keys
+		accessKey := *keys[0].Value
+		names.storageAccountAccessKey = accessKey
+
+		storageAuth, err := autorest.NewSharedKeyAuthorizer(names.storageAccountName, accessKey, autorest.SharedKey)
+		if err != nil {
+			return fmt.Errorf("Error building Authorizer: %+v", err)
+		}
+
+		containersClient.Client.Authorizer = storageAuth
+	}
 
 	log.Printf("Creating Container %q in Storage Account %q (Resource Group %q)", names.storageContainerName, names.storageAccountName, names.resourceGroup)
 	_, err = containersClient.Create(ctx, names.storageAccountName, names.storageContainerName, containers.CreateInput{})

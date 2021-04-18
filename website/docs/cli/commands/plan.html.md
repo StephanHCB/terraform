@@ -69,9 +69,6 @@ The available options are:
 
 * `-refresh=true` - Update the state prior to checking for differences.
 
-* `-state=path` - Path to the state file. Defaults to "terraform.tfstate".
-  Ignored when [remote state](/docs/language/state/remote.html) is used.
-
 * `-target=resource` - A [Resource
   Address](/docs/cli/state/resource-addressing.html) to target. This flag can
   be used multiple times. See below for more information.
@@ -89,7 +86,14 @@ The available options are:
   specified by `-var-file` override any values set automatically from files in
   the working directory. This flag can be used multiple times.
 
+For configurations using
+[the `local` backend](/docs/language/settings/backends/local.html) only,
+`terraform plan` accepts the legacy command line option
+[`-state`](/docs/language/settings/backends/local.html#command-line-arguments).
+
 ## Resource Targeting
+
+> **Hands-on:** Try the [Target resources](https://learn.hashicorp.com/tutorials/terraform/resource-targeting?in=terraform/state&utm_source=WEBSITE&utm_medium=WEB_IO&utm_offer=ARTICLE_PAGE&utm_content=DOCS) tutorial on HashiCorp Learn.
 
 The `-target` option can be used to focus Terraform's attention on only a
 subset of resources.

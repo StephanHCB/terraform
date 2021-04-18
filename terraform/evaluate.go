@@ -15,7 +15,6 @@ import (
 	"github.com/hashicorp/terraform/addrs"
 	"github.com/hashicorp/terraform/configs"
 	"github.com/hashicorp/terraform/configs/configschema"
-	"github.com/hashicorp/terraform/experiments"
 	"github.com/hashicorp/terraform/instances"
 	"github.com/hashicorp/terraform/lang"
 	"github.com/hashicorp/terraform/plans"
@@ -758,16 +757,13 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 				continue
 			}
 
-			// EXPERIMENTAL: Suppressing provider-defined sensitive attrs
-			// from Terraform output.
-
-			// If our schema contains sensitive values, mark those as sensitive
-			if moduleConfig.Module.ActiveExperiments.Has(experiments.SuppressProviderSensitiveAttrs) {
-				if schema.ContainsSensitive() {
-					val = markProviderSensitiveAttributes(schema, val)
-				}
+			// If our provider schema contains sensitive values, mark those as sensitive
+			afterMarks := change.AfterValMarks
+			if schema.ContainsSensitive() {
+				afterMarks = append(afterMarks, getValMarks(schema, val, nil)...)
 			}
-			instances[key] = val.MarkWithPaths(change.AfterValMarks)
+
+			instances[key] = val.MarkWithPaths(afterMarks)
 			continue
 		}
 
@@ -785,14 +781,16 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 		}
 
 		val := ios.Value
-		// EXPERIMENTAL: Suppressing provider-defined sensitive attrs
-		// from Terraform output.
 
-		// If our schema contains sensitive values, mark those as sensitive
-		if moduleConfig.Module.ActiveExperiments.Has(experiments.SuppressProviderSensitiveAttrs) {
-			if schema.ContainsSensitive() {
-				val = markProviderSensitiveAttributes(schema, val)
-			}
+		// If our schema contains sensitive values, mark those as sensitive.
+		// Since decoding the instance object can also apply sensitivity marks,
+		// we must remove and combine those before remarking to avoid a double-
+		// mark error.
+		if schema.ContainsSensitive() {
+			var marks []cty.PathValueMarks
+			val, marks = val.UnmarkDeepWithPaths()
+			marks = append(marks, getValMarks(schema, val, nil)...)
+			val = val.MarkWithPaths(marks)
 		}
 		instances[key] = val
 	}
@@ -962,12 +960,6 @@ func moduleDisplayAddr(addr addrs.ModuleInstance) string {
 	}
 }
 
-// markProviderSensitiveAttributes returns an updated value
-// where attributes that are Sensitive are marked
-func markProviderSensitiveAttributes(schema *configschema.Block, val cty.Value) cty.Value {
-	return val.MarkWithPaths(getValMarks(schema, val, nil))
-}
-
 func getValMarks(schema *configschema.Block, val cty.Value, path cty.Path) []cty.PathValueMarks {
 	var pvm []cty.PathValueMarks
 	for name, attrS := range schema.Attributes {
@@ -988,12 +980,17 @@ func getValMarks(schema *configschema.Block, val cty.Value, path cty.Path) []cty
 		if !blockS.Block.ContainsSensitive() {
 			continue
 		}
+
+		blockV := val.GetAttr(name)
+		if blockV.IsNull() || !blockV.IsKnown() {
+			continue
+		}
+
 		// Create a copy of the path, with this step added, to add to our PathValueMarks slice
 		blockPath := make(cty.Path, len(path), len(path)+1)
 		copy(blockPath, path)
 		blockPath = append(path, cty.GetAttrStep{Name: name})
 
-		blockV := val.GetAttr(name)
 		switch blockS.Nesting {
 		case configschema.NestingSingle, configschema.NestingGroup:
 			pvm = append(pvm, getValMarks(&blockS.Block, blockV, blockPath)...)

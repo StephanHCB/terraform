@@ -805,15 +805,47 @@ func TestContext2Apply_createBeforeDestroyUpdate(t *testing.T) {
 	m := testModule(t, "apply-good-create-before-update")
 	p := testProvider("aws")
 	p.PlanResourceChangeFn = testDiffFn
-	p.ApplyResourceChangeFn = testApplyFn
+
+	// signal that resource foo has started applying
+	fooChan := make(chan struct{})
+
+	p.ApplyResourceChangeFn = func(req providers.ApplyResourceChangeRequest) (resp providers.ApplyResourceChangeResponse) {
+		id := req.PriorState.GetAttr("id").AsString()
+		switch id {
+		case "bar":
+			select {
+			case <-fooChan:
+				resp.Diagnostics = resp.Diagnostics.Append(errors.New("bar must be updated before foo is destroyed"))
+				return resp
+			case <-time.After(100 * time.Millisecond):
+				// wait a moment to ensure that foo is not going to be destroyed first
+			}
+		case "foo":
+			close(fooChan)
+		}
+
+		return testApplyFn(req)
+	}
 
 	state := states.NewState()
 	root := state.EnsureModule(addrs.RootModuleInstance)
+	fooAddr := mustResourceInstanceAddr("aws_instance.foo")
+	root.SetResourceInstanceCurrent(
+		fooAddr.Resource,
+		&states.ResourceInstanceObjectSrc{
+			Status:              states.ObjectReady,
+			AttrsJSON:           []byte(`{"id":"foo","foo":"bar"}`),
+			CreateBeforeDestroy: true,
+		},
+		mustProviderConfig(`provider["registry.terraform.io/hashicorp/aws"]`),
+	)
 	root.SetResourceInstanceCurrent(
 		mustResourceInstanceAddr("aws_instance.bar").Resource,
 		&states.ResourceInstanceObjectSrc{
-			Status:    states.ObjectReady,
-			AttrsJSON: []byte(`{"id":"bar","foo":"bar"}`),
+			Status:              states.ObjectReady,
+			AttrsJSON:           []byte(`{"id":"bar","foo":"bar"}`),
+			CreateBeforeDestroy: true,
+			Dependencies:        []addrs.ConfigResource{fooAddr.ContainingResource().Config()},
 		},
 		mustProviderConfig(`provider["registry.terraform.io/hashicorp/aws"]`),
 	)
@@ -8372,8 +8404,8 @@ func TestContext2Apply_ignoreChangesWithDep(t *testing.T) {
 	}
 }
 
-func TestContext2Apply_ignoreChangesWildcard(t *testing.T) {
-	m := testModule(t, "apply-ignore-changes-wildcard")
+func TestContext2Apply_ignoreChangesAll(t *testing.T) {
+	m := testModule(t, "apply-ignore-changes-all")
 	p := testProvider("aws")
 	p.PlanResourceChangeFn = testDiffFn
 	p.ApplyResourceChangeFn = testApplyFn
@@ -11938,10 +11970,6 @@ resource "test_resource" "foo" {
 func TestContext2Apply_variableSensitivityProviders(t *testing.T) {
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
-terraform {
-	experiments = [provider_sensitive_attrs]
-}
-
 resource "test_resource" "foo" {
 	sensitive_value = "should get marked"
 }
@@ -12439,9 +12467,10 @@ func TestContext2Apply_errorRestoreStatus(t *testing.T) {
 
 	state := states.BuildState(func(s *states.SyncState) {
 		s.SetResourceInstanceCurrent(addr, &states.ResourceInstanceObjectSrc{
-			Status:    states.ObjectTainted,
-			AttrsJSON: []byte(`{"test_string":"foo"}`),
-			Private:   []byte("private"),
+			Status:       states.ObjectTainted,
+			AttrsJSON:    []byte(`{"test_string":"foo"}`),
+			Private:      []byte("private"),
+			Dependencies: []addrs.ConfigResource{mustConfigResourceAddr("test_object.b")},
 		}, mustProviderConfig(`provider["registry.terraform.io/hashicorp/test"]`))
 	})
 
@@ -12476,6 +12505,10 @@ func TestContext2Apply_errorRestoreStatus(t *testing.T) {
 
 	if res.Current.Status != states.ObjectTainted {
 		t.Fatal("resource should still be tainted in the state")
+	}
+
+	if len(res.Current.Dependencies) != 1 || !res.Current.Dependencies[0].Equal(mustConfigResourceAddr("test_object.b")) {
+		t.Fatalf("incorrect dependencies, got %q", res.Current.Dependencies)
 	}
 
 	if string(res.Current.Private) != "private" {

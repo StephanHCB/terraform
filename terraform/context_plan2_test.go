@@ -249,3 +249,193 @@ resource "test_object" "a" {
 		t.Fatal(diags.Err())
 	}
 }
+
+func TestContext2Plan_dataReferencesResourceInModules(t *testing.T) {
+	p := testProvider("test")
+	p.ReadDataSourceFn = func(req providers.ReadDataSourceRequest) (resp providers.ReadDataSourceResponse) {
+		cfg := req.Config.AsValueMap()
+		cfg["id"] = cty.StringVal("d")
+		resp.State = cty.ObjectVal(cfg)
+		return resp
+	}
+
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+locals {
+  things = {
+    old = "first"
+    new = "second"
+  }
+}
+
+module "mod" {
+  source = "./mod"
+  for_each = local.things
+}
+`,
+
+		"./mod/main.tf": `
+resource "test_resource" "a" {
+}
+
+data "test_data_source" "d" {
+  depends_on = [test_resource.a]
+}
+
+resource "test_resource" "b" {
+  value = data.test_data_source.d.id
+}
+`})
+
+	oldDataAddr := mustResourceInstanceAddr(`module.mod["old"].data.test_data_source.d`)
+
+	state := states.BuildState(func(s *states.SyncState) {
+		s.SetResourceInstanceCurrent(
+			mustResourceInstanceAddr(`module.mod["old"].test_resource.a`),
+			&states.ResourceInstanceObjectSrc{
+				AttrsJSON: []byte(`{"id":"a"}`),
+				Status:    states.ObjectReady,
+			}, mustProviderConfig(`provider["registry.terraform.io/hashicorp/test"]`),
+		)
+		s.SetResourceInstanceCurrent(
+			mustResourceInstanceAddr(`module.mod["old"].test_resource.b`),
+			&states.ResourceInstanceObjectSrc{
+				AttrsJSON: []byte(`{"id":"b","value":"d"}`),
+				Status:    states.ObjectReady,
+			}, mustProviderConfig(`provider["registry.terraform.io/hashicorp/test"]`),
+		)
+		s.SetResourceInstanceCurrent(
+			oldDataAddr,
+			&states.ResourceInstanceObjectSrc{
+				AttrsJSON: []byte(`{"id":"d"}`),
+				Status:    states.ObjectReady,
+			}, mustProviderConfig(`provider["registry.terraform.io/hashicorp/test"]`),
+		)
+	})
+
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+		State: state,
+	})
+
+	plan, diags := ctx.Plan()
+	assertNoErrors(t, diags)
+
+	oldMod := oldDataAddr.Module
+
+	for _, c := range plan.Changes.Resources {
+		// there should be no changes from the old module instance
+		if c.Addr.Module.Equal(oldMod) && c.Action != plans.NoOp {
+			t.Errorf("unexpected change %s for %s\n", c.Action, c.Addr)
+		}
+	}
+}
+
+func TestContext2Plan_destroySkipRefresh(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_object" "a" {
+}
+`,
+	})
+
+	p := simpleMockProvider()
+
+	addr := mustResourceInstanceAddr("test_object.a")
+	state := states.BuildState(func(s *states.SyncState) {
+		s.SetResourceInstanceCurrent(addr, &states.ResourceInstanceObjectSrc{
+			AttrsJSON: []byte(`{"test_string":"foo"}`),
+			Status:    states.ObjectReady,
+		}, mustProviderConfig(`provider["registry.terraform.io/hashicorp/test"]`))
+	})
+
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		State:  state,
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+		Destroy:     true,
+		SkipRefresh: true,
+	})
+
+	plan, diags := ctx.Plan()
+	if diags.HasErrors() {
+		t.Fatal(diags.Err())
+	}
+
+	if plan.State == nil {
+		t.Fatal("missing plan state")
+	}
+
+	for _, c := range plan.Changes.Resources {
+		if c.Action != plans.Delete {
+			t.Errorf("unexpected %s change for %s", c.Action, c.Addr)
+		}
+	}
+}
+
+func TestContext2Plan_unmarkingSensitiveAttributeForOutput(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_resource" "foo" {
+}
+
+output "result" {
+  value = nonsensitive(test_resource.foo.sensitive_attr)
+}
+`,
+	})
+
+	p := new(MockProvider)
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"id": {
+						Type:     cty.String,
+						Computed: true,
+					},
+					"sensitive_attr": {
+						Type:      cty.String,
+						Computed:  true,
+						Sensitive: true,
+					},
+				},
+			},
+		},
+	})
+
+	p.PlanResourceChangeFn = func(req providers.PlanResourceChangeRequest) providers.PlanResourceChangeResponse {
+		return providers.PlanResourceChangeResponse{
+			PlannedState: cty.UnknownVal(cty.Object(map[string]cty.Type{
+				"id":             cty.String,
+				"sensitive_attr": cty.String,
+			})),
+		}
+	}
+
+	state := states.NewState()
+
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+		State: state,
+	})
+
+	plan, diags := ctx.Plan()
+	if diags.HasErrors() {
+		t.Fatal(diags.ErrWithWarnings())
+	}
+
+	for _, res := range plan.Changes.Resources {
+		if res.Action != plans.Create {
+			t.Fatalf("expected create, got: %q %s", res.Addr, res.Action)
+		}
+	}
+}
