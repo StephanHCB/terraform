@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/hashicorp/terraform/states/statecrypto/cryptoconfig"
 	"io"
 	"log"
 	"regexp"
@@ -14,18 +15,12 @@ import (
 
 type AES256StateWrapper struct {
 	key         []byte
-	previousKey []byte
 }
 
-func parseKey(hexKey string, name string) ([]byte, error) {
-	if hexKey == "" {
-		// this case is explicitly allowed to support planned decryption
-		return []byte{}, nil
-	}
-
+func parseKey(hexKey string) ([]byte, error) {
 	validator := regexp.MustCompile("^[0-9a-f]{64}$")
 	if !validator.MatchString(hexKey) {
-		return []byte{}, fmt.Errorf("%s was not a hex string representing 32 bytes, must match [0-9a-f]{64}", name)
+		return []byte{}, fmt.Errorf("key was not a hex string representing 32 bytes, must match [0-9a-f]{64}")
 	}
 
 	key, _ := hex.DecodeString(hexKey)
@@ -33,26 +28,18 @@ func parseKey(hexKey string, name string) ([]byte, error) {
 	return key, nil
 }
 
-func (a *AES256StateWrapper) parseKeysFromConfiguration(config []string) error {
-	if len(config) < 2 || len(config) > 3 {
-		return fmt.Errorf("configuration for AES256 needs to be AES256:key[:previousKey] where keys are 32 byte lower case hexadecimals and previous key is optional")
+func (a *AES256StateWrapper) parseKeyFromConfiguration(config cryptoconfig.StateCryptoConfig) error {
+	hexkey, ok := config.Parameters["key"]
+	if !ok {
+		return fmt.Errorf("configuration for AES256 needs the parameter 'key' set to a 32 byte lower case hexadecimal value")
 	}
 
-	key, err := parseKey(config[1], "main key")
+	key, err := parseKey(hexkey)
 	if err != nil {
 		return err
 	}
-	a.key = key
 
-	if len(config) == 3 {
-		key, err := parseKey(config[2], "previous key")
-		if err != nil {
-			return err
-		}
-		a.previousKey = key
-	} else {
-		a.previousKey = []byte{}
-	}
+	a.key = []byte(key)
 	return nil
 }
 
@@ -68,8 +55,6 @@ func (a *AES256StateWrapper) isSyntacticallyValidEncrypted(data []byte) bool {
 	return validator.Match(data)
 }
 
-// decrypt the hex-encoded contents of data, which is expected to be of the form
-//         {"crypted":"<hex containing iv and payload>"}
 func (a *AES256StateWrapper) attemptDecryption(jsonCryptedData []byte, key []byte) ([]byte, error) {
 	if !a.isSyntacticallyValidEncrypted(jsonCryptedData) {
 		return []byte{}, fmt.Errorf("ciphertext contains invalid characters, possibly cut off or garbled")
@@ -155,20 +140,13 @@ func (a *AES256StateWrapper) Encrypt(plaintextPayload []byte) ([]byte, error) {
 	return jsonCryptedData, nil
 }
 
+// decrypt the hex-encoded contents of data, which is expected to be of the form
+//         {"crypted":"<hex containing iv and payload>"}
+// supports reading unencrypted state as well but logs a warning
 func (a *AES256StateWrapper) Decrypt(data []byte) ([]byte, error) {
 	if a.isEncrypted(data) {
 		candidate, err := a.attemptDecryption(data, a.key)
 		if err != nil {
-			// allow key rotation (just change some null resource that is in the state file so it is rewritten)
-			if a.previousKey != nil && len(a.previousKey) != 0 {
-				log.Printf("failed to decrypt with main key, trying secondary key")
-				candidate2, err := a.attemptDecryption(data, a.previousKey)
-				if err != nil {
-					log.Printf("failed to decrypt with secondary key as well, bailing out")
-					return []byte{}, err
-				}
-				return candidate2, nil
-			}
 			return []byte{}, err
 		}
 		return candidate, nil

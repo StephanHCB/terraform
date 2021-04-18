@@ -7,16 +7,22 @@ import (
 	"log"
 )
 
-func StateCryptoWrapper() StateCryptoProvider {
+func instanceFromConfig(config cryptoconfig.StateCryptoConfig, allowPassthrough bool) StateCryptoProvider {
 	var implementation StateCryptoProvider
 	var err error = nil
 
-	config := cryptoconfig.Configuration()
-	switch name := cryptoconfig.ConfiguredImplementation(config); name {
-	case "AES256":
+	switch config.Implementation {
+	case "client-side/AES256-cfb/SHA256":
 		implementation, err = aes256state.New(config)
+	case "":
+		if allowPassthrough {
+			implementation, err = passthrough.New(config)
+		} else {
+			// valid case for fallback
+			return nil
+		}
 	default:
-		implementation, err = passthrough.New(config)
+		log.Fatalf("error configuring state file crypto: unsupported implementation '%s'", config.Implementation)
 	}
 
 	if err != nil {
@@ -24,4 +30,19 @@ func StateCryptoWrapper() StateCryptoProvider {
 	}
 
 	return implementation
+}
+
+func firstChoice() StateCryptoProvider {
+	return instanceFromConfig(cryptoconfig.Configuration(), true)
+}
+
+func fallback() StateCryptoProvider {
+	return instanceFromConfig(cryptoconfig.FallbackConfiguration(), false)
+}
+
+func StateCryptoWrapper() StateCryptoProvider {
+	return &FallbackRetryStateWrapper{
+		firstChoice: firstChoice(),
+		fallback:    fallback(),
+	}
 }

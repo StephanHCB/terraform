@@ -1,8 +1,10 @@
 package aes256state
 
-// New creates a new AES256 state encryption wrapper.
-func New(configuration []string) (*AES256StateWrapper, error) {
+import "github.com/hashicorp/terraform/states/statecrypto/cryptoconfig"
+
+// New creates a new client-side/AES256-cfb/SHA256 state encryption wrapper.
+func New(configuration cryptoconfig.StateCryptoConfig) (*AES256StateWrapper, error) {
 	instance := &AES256StateWrapper{}
-	err := instance.parseKeysFromConfiguration(configuration)
+	err := instance.parseKeyFromConfiguration(configuration)
 	return instance, err
 }
